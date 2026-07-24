@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
@@ -125,6 +125,25 @@ impl ModeHandle {
     }
 }
 
+/// Shared, lock-free handle the UI thread uses to mute this app's forwarded
+/// audio without touching the OS output device's master mute.
+#[derive(Clone)]
+pub struct MuteHandle(Arc<AtomicBool>);
+
+impl MuteHandle {
+    pub fn new(initial: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(initial)))
+    }
+
+    pub fn set(&self, muted: bool) {
+        self.0.store(muted, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 pub fn list_input_devices() -> Vec<Device> {
     let host = cpal::default_host();
     host.input_devices()
@@ -153,7 +172,7 @@ impl AudioEngine {
         self.error.lock().unwrap().take()
     }
 
-    pub fn start(input: &Device, output: &Device, mode: ModeHandle) -> Result<Self> {
+    pub fn start(input: &Device, output: &Device, mode: ModeHandle, mute: MuteHandle) -> Result<Self> {
         let input_config: StreamConfig = input
             .default_input_config()
             .context("no default input config")?
@@ -209,6 +228,7 @@ impl AudioEngine {
             output.default_output_config()?.sample_format(),
             channels,
             mode,
+            mute,
             move |out: &mut [f32]| {
                 let filled = consumer.pop_slice(out);
                 for sample in &mut out[filled..] {
@@ -281,6 +301,7 @@ fn build_output_stream(
     sample_format: SampleFormat,
     channels: usize,
     mode: ModeHandle,
+    mute: MuteHandle,
     mut fill: impl FnMut(&mut [f32]) + Send + 'static,
     error: Arc<Mutex<Option<String>>>,
 ) -> Result<cpal::Stream> {
@@ -295,6 +316,9 @@ fn build_output_stream(
             move |data: &mut [f32], _| {
                 fill(data);
                 apply_mode_in_place(data, channels, mode.get());
+                if mute.get() {
+                    data.fill(0.0);
+                }
             },
             err_fn,
             None,

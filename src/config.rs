@@ -6,6 +6,8 @@ pub struct AppConfig {
     pub input_device_name: Option<String>,
     pub output_device_name: Option<String>,
     pub mode_code: Option<u8>,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 fn config_path() -> Option<PathBuf> {

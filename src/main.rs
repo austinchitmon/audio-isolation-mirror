@@ -5,7 +5,7 @@ mod dsp;
 use cpal::traits::DeviceTrait;
 use eframe::egui;
 
-use audio::{list_input_devices, list_output_devices, AudioEngine, ModeHandle};
+use audio::{list_input_devices, list_output_devices, AudioEngine, ModeHandle, MuteHandle};
 use dsp::ChannelMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +57,8 @@ struct App {
     channel: ChannelSelection,
     mirror: bool,
     mode_handle: ModeHandle,
+    muted: bool,
+    mute_handle: MuteHandle,
     engine: Option<AudioEngine>,
     error: Option<String>,
 }
@@ -73,6 +75,8 @@ impl App {
         let initial_mode = config.mode_code.map(ChannelMode::from_code).unwrap_or(ChannelMode::Both);
         let (channel, mirror) = decompose(initial_mode);
         let mode_handle = ModeHandle::new(initial_mode);
+        let muted = config.muted;
+        let mute_handle = MuteHandle::new(muted);
 
         let mut app = Self {
             inputs,
@@ -82,6 +86,8 @@ impl App {
             channel,
             mirror,
             mode_handle,
+            muted,
+            mute_handle,
             engine: None,
             error: None,
         };
@@ -97,7 +103,7 @@ impl App {
         let output = self.selected_output.and_then(|i| self.outputs.get(i));
 
         if let (Some(input), Some(output)) = (input, output) {
-            match AudioEngine::start(input, output, self.mode_handle.clone()) {
+            match AudioEngine::start(input, output, self.mode_handle.clone(), self.mute_handle.clone()) {
                 Ok(engine) => self.engine = Some(engine),
                 Err(e) => self.error = Some(e.to_string()),
             }
@@ -120,6 +126,7 @@ impl App {
             input_device_name,
             output_device_name,
             mode_code: Some(effective_mode(self.channel, self.mirror).to_code()),
+            muted: self.muted,
         }
         .save();
     }
@@ -201,6 +208,18 @@ impl eframe::App for App {
 
             if mode_changed {
                 self.mode_handle.set(effective_mode(self.channel, self.mirror));
+                self.save_config();
+            }
+
+            ui.separator();
+            if ui
+                .checkbox(&mut self.muted, "Mute")
+                .on_hover_text(
+                    "Silences only this app's forwarded audio. Does not mute the output device for other apps.",
+                )
+                .changed()
+            {
+                self.mute_handle.set(self.muted);
                 self.save_config();
             }
 
