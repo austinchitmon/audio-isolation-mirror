@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.0] - 2026-07-24
+
+### Added
+- **Mute** checkbox: silences only this app's forwarded audio, without touching the output device's master volume/mute (so other apps on the same output aren't affected). Persists across restarts.
+
+### Changed
+- The release exe no longer opens a background console window alongside the GUI.
+- The release exe statically links the MSVC C runtime, so it no longer depends on a separately-installed Visual C++ Redistributable.
+- README rewritten with a plain-language "Quick Start (for viewers)" section aimed at non-technical users, separate from developer/build instructions.
+
 ## [0.1.0] - 2026-07-23
 
 Initial working version. Isolates a livestream's stereo audio to Left, Right, or Both channels, with an option to mirror an isolated channel into both outputs instead of muting the other side.
