@@ -45,6 +45,8 @@ cargo build --release
 
 The binary will be at `target/release/audio_isolation_mirror.exe`.
 
+Prebuilt executables are also published on the [Releases](https://github.com/austinchitmon/audio-isolation-mirror/releases) page — no Rust toolchain needed if you just want to run the app. Note the exe is unsigned, so Windows SmartScreen will show an "unknown publisher" warning on first run.
+
 ## Running
 
 ```
@@ -72,6 +74,15 @@ Your device and mode selections are remembered between runs (saved to `%APPDATA%
 - `src/config.rs` handles loading/saving the last-used devices and mode.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+### Cutting a release
+
+Pushing a version tag triggers `.github/workflows/release.yml`, which builds the Windows binary and publishes it to the Releases page automatically:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## Known limitations
 
