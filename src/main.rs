@@ -3,12 +3,14 @@
 mod audio;
 mod config;
 mod dsp;
+mod winaudio;
 
 use cpal::traits::DeviceTrait;
 use eframe::egui;
 
 use audio::{list_input_devices, list_output_devices, AudioEngine, ModeHandle, MuteHandle};
 use dsp::ChannelMode;
+use winaudio::{AudioSession, EndpointOverride};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChannelSelection {
@@ -31,6 +33,15 @@ fn decompose(mode: ChannelMode) -> (ChannelSelection, bool) {
         ChannelMode::Left { mirror } => (ChannelSelection::Left, mirror),
         ChannelMode::Right { mirror } => (ChannelSelection::Right, mirror),
     }
+}
+
+/// The app most recently routed to CABLE Input, and what its audio routing
+/// looked like before we touched it -- so it can be put back the way it was
+/// when the user picks a different app or closes this app.
+struct ActiveRoute {
+    pid: u32,
+    exe_name: String,
+    original: EndpointOverride,
 }
 
 fn pick_index(devices: &[cpal::Device], preferred_name: Option<&str>) -> Option<usize> {
@@ -63,6 +74,11 @@ struct App {
     mute_handle: MuteHandle,
     engine: Option<AudioEngine>,
     error: Option<String>,
+    audio_sessions: Vec<AudioSession>,
+    selected_session: Option<usize>,
+    route_status: Option<String>,
+    pending_route: Option<usize>,
+    active_route: Option<ActiveRoute>,
 }
 
 impl App {
@@ -92,6 +108,11 @@ impl App {
             mute_handle,
             engine: None,
             error: None,
+            audio_sessions: Vec::new(),
+            selected_session: None,
+            route_status: None,
+            pending_route: None,
+            active_route: None,
         };
         app.restart_engine();
         app
@@ -132,10 +153,79 @@ impl App {
         }
         .save();
     }
+
+    /// Actually performs the routing for `pending_route`, if any was queued
+    /// last frame. Run at the start of the frame *after* the one that queued
+    /// it, so the "Routing..." status has a chance to actually be painted
+    /// and presented before this (synchronous, blocking) work runs.
+    fn process_pending_route(&mut self) {
+        let Some(idx) = self.pending_route.take() else { return };
+        let Some(session) = self.audio_sessions.get(idx) else { return };
+        let pid = session.pid;
+        let exe_name = session.exe_name.clone();
+
+        // Put whichever app we previously routed back the way it was before
+        // routing this newly-selected one.
+        self.restore_active_route();
+
+        let original = match winaudio::get_endpoint_override(pid) {
+            Ok(original) => original,
+            Err(e) => {
+                self.error = Some(format!(
+                    "Couldn't read {exe_name}'s current audio routing: {e}"
+                ));
+                return;
+            }
+        };
+
+        match winaudio::find_render_endpoint_id_by_name("CABLE Input") {
+            Ok(Some(device_id)) => match winaudio::route_process_to_endpoint(pid, &device_id) {
+                Ok(()) => {
+                    self.error = None;
+                    self.route_status = Some(format!(
+                        "{exe_name} is now routed to CABLE Input. If you don't hear it \
+                         come through yet, refresh/restart playback in that app."
+                    ));
+                    self.active_route = Some(ActiveRoute { pid, exe_name, original });
+                }
+                Err(e) => {
+                    self.error = Some(format!(
+                        "Automatic app routing isn't available on this Windows version ({e}). \
+                         Route manually instead: Settings -> System -> Sound -> Volume mixer \
+                         -> set your browser's output to 'CABLE Input'."
+                    ));
+                }
+            },
+            Ok(None) => {
+                self.error = Some(
+                    "Couldn't find a 'CABLE Input' playback device -- is \
+                     VB-Audio Virtual Cable installed?"
+                        .to_string(),
+                );
+            }
+            Err(e) => {
+                self.error = Some(format!("Couldn't look up the CABLE Input device: {e}"));
+            }
+        }
+    }
+
+    /// Puts the currently-routed app's audio back the way it was before this
+    /// app touched it. Called when the user switches to routing a different
+    /// app, and on shutdown so the system doesn't stay silently repointed at
+    /// CABLE Input after this app closes.
+    fn restore_active_route(&mut self) {
+        if let Some(prev) = self.active_route.take() {
+            if let Err(e) = winaudio::restore_endpoint(prev.pid, &prev.original) {
+                eprintln!("failed to restore {}'s audio routing: {e}", prev.exe_name);
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_pending_route();
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Big Brother Channel Isolator");
             ui.separator();
@@ -184,6 +274,64 @@ impl eframe::App for App {
 
             if device_changed {
                 self.restart_engine();
+            }
+
+            ui.separator();
+            ui.label("Send your livestream into the cable");
+            ui.horizontal(|ui| {
+                if ui
+                    .button("🔄")
+                    .on_hover_text("Detect apps with audio playing")
+                    .clicked()
+                {
+                    self.route_status = None;
+                    match winaudio::list_active_render_sessions() {
+                        Ok(sessions) => {
+                            self.selected_session = None;
+                            self.error = None;
+                            if sessions.is_empty() {
+                                self.error = Some(
+                                    "No apps are currently playing audio. Start playback in \
+                                     your browser tab, then refresh again."
+                                        .to_string(),
+                                );
+                            }
+                            self.audio_sessions = sessions;
+                        }
+                        Err(e) => self.error = Some(format!("Couldn't detect apps: {e}")),
+                    }
+                }
+
+                egui::ComboBox::from_id_salt("audio_session")
+                    .selected_text(
+                        self.selected_session
+                            .and_then(|i| self.audio_sessions.get(i))
+                            .map(|s| format!("{} (pid {})", s.exe_name, s.pid))
+                            .unwrap_or_else(|| "<none detected>".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for i in 0..self.audio_sessions.len() {
+                            let label = format!(
+                                "{} (pid {})",
+                                self.audio_sessions[i].exe_name, self.audio_sessions[i].pid
+                            );
+                            if ui
+                                .selectable_value(&mut self.selected_session, Some(i), label)
+                                .changed()
+                            {
+                                self.route_status = None;
+                                self.error = None;
+                                self.pending_route = Some(i);
+                                ctx.request_repaint();
+                            }
+                        }
+                    });
+            });
+
+            if self.pending_route.is_some() {
+                ui.colored_label(egui::Color32::YELLOW, "Routing to CABLE Input...");
+            } else if let Some(status) = &self.route_status {
+                ui.colored_label(egui::Color32::GREEN, status);
             }
 
             ui.separator();
@@ -247,6 +395,10 @@ impl eframe::App for App {
         // Stream errors arrive on a background audio thread with no repaint of
         // their own; poll periodically so a mid-stream disconnect shows up promptly.
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.restore_active_route();
     }
 }
 

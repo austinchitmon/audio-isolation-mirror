@@ -26,6 +26,8 @@ Browser (livestream tab)
   -> this app renders to your real headphones/speakers
 ```
 
+The "Route to CABLE Input" button in the app does the routing step for you, using the same (undocumented) per-app audio routing mechanism Windows' own Volume Mixer uses internally. It has no official warranty from Microsoft, so it can occasionally fail on a given Windows build — the manual Volume Mixer method above always works as a fallback.
+
 ## Quick Start (for viewers)
 
 You only need to do this once.
@@ -36,7 +38,7 @@ You only need to do this once.
 4. **Pick your devices** in the app window that opens:
    - **Input**: "CABLE Output (VB-Audio Virtual Cable)"
    - **Output**: your real headphones or speakers
-5. **Send your livestream into the cable**: Settings → System → Sound → Volume mixer → find your browser (or whichever app is playing the stream) → set its **Output device** to "CABLE Input (VB-Audio Virtual Cable)".
+5. **Send your livestream into the cable**: start playback in your browser tab first, then in the app click **Detect apps with audio playing**, select your browser from the list, and click **Route to CABLE Input**. This routes the app going forward, but usually won't move audio that's already mid-stream — refresh the page or restart the video if you don't hear it come through the app right away. If routing doesn't work at all (see note below), you can still do it manually: Settings → System → Sound → Volume mixer → find your browser (or whichever app is playing the stream) → set its **Output device** to "CABLE Input (VB-Audio Virtual Cable)".
 6. **Use the controls** as needed: pick a channel mode (Both / Left / Right, with Mirror if isolating to one side), or check **Mute** to silence just this app's audio without touching anything else on your PC.
 
 That's it — the app remembers your device and mode choices, so future launches just work. Keep the app running in the background while you watch.
@@ -93,5 +95,5 @@ git push origin v0.1.0
 
 - Windows only for now. The audio engine (`cpal`) and UI (`egui`/`eframe`) both support macOS and Linux, so a port mainly means swapping the virtual-cable tool (e.g. [BlackHole](https://github.com/ExistentialAudio/BlackHole) on macOS, a PipeWire/PulseAudio null-sink on Linux) rather than rewriting the engine.
 - No system tray mode, hotkeys, or level meters yet.
-- No native per-process loopback capture — a virtual audio cable is required.
+- No native per-process loopback capture — a virtual audio cable is required. The app can route a chosen app's *output* to that cable for you (see step 5), but it still can't capture an app's audio directly.
 - The released `.exe` isn't code-signed, so the SmartScreen warning in the Quick Start above will appear on first run. This is a one-time click-through, not a sign of a problem.

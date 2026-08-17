@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+- One-click app audio routing: click **Detect apps with audio playing**, pick your browser (or whichever app is playing the stream), and click **Route to CABLE Input** to send its output into the virtual cable directly from the app — no more digging through Settings → Sound → Volume mixer. Uses the same (undocumented) per-app routing API Windows' own Volume Mixer uses; falls back to the manual Volume Mixer method if it's ever unavailable.
+
 ## [0.2.0] - 2026-07-24
 
 ### Added
