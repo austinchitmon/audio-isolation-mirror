@@ -410,6 +410,9 @@ impl eframe::App for App {
         self.process_pending_route();
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // If the window gets resized shorter than the content needs, show
+            // a vertical scrollbar instead of clipping the bottom off.
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Audio Channel Isolator");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -609,6 +612,7 @@ impl eframe::App for App {
                         }
                     });
             }
+            });
         });
 
         if self.show_vb_cable_warning {
