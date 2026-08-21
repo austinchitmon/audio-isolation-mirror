@@ -54,6 +54,12 @@ const SETTINGS_SIZE: [f32; 2] = [360.0, 130.0];
 /// requested size and position have actually been applied by the OS.
 const REVEAL_FRAME: u32 = 3;
 
+/// Substring VB-CABLE's recording device registers under, e.g.
+/// "CABLE Output (VB-Audio Virtual Cable)".
+const VB_CABLE_NAME_HINT: &str = "VB-Audio Virtual Cable";
+
+const VB_CABLE_DOWNLOAD_URL: &str = "https://vb-audio.com/Cable/";
+
 fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
     sessions.iter().position(|s| {
         AUTO_ROUTE_CANDIDATES
@@ -62,14 +68,18 @@ fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
     })
 }
 
+fn find_by_name(devices: &[cpal::Device], name: &str) -> Option<usize> {
+    let needle = name.to_lowercase();
+    devices.iter().position(|d| {
+        d.name()
+            .map(|n| n.to_lowercase().contains(&needle))
+            .unwrap_or(false)
+    })
+}
+
 fn pick_index(devices: &[cpal::Device], preferred_name: Option<&str>) -> Option<usize> {
     if let Some(name) = preferred_name {
-        let needle = name.to_lowercase();
-        if let Some(i) = devices.iter().position(|d| {
-            d.name()
-                .map(|n| n.to_lowercase().contains(&needle))
-                .unwrap_or(false)
-        }) {
+        if let Some(i) = find_by_name(devices, name) {
             return Some(i);
         }
     }
@@ -100,6 +110,7 @@ struct App {
     show_settings: bool,
     settings_pos: Option<egui::Pos2>,
     settings_frames: u32,
+    show_vb_cable_warning: bool,
 }
 
 impl App {
@@ -108,7 +119,16 @@ impl App {
         let outputs = list_output_devices();
         let config = config::AppConfig::load();
 
-        let selected_input = pick_index(&inputs, config.input_device_name.as_deref());
+        // Prefer whatever the user explicitly picked last time; otherwise
+        // assume VB-Audio Virtual Cable is installed and find it ourselves,
+        // so non-technical users never have to open Settings at all.
+        let vb_cable_present = find_by_name(&inputs, VB_CABLE_NAME_HINT).is_some();
+        let selected_input = config
+            .input_device_name
+            .as_deref()
+            .and_then(|name| find_by_name(&inputs, name))
+            .or_else(|| find_by_name(&inputs, VB_CABLE_NAME_HINT))
+            .or(if inputs.is_empty() { None } else { Some(0) });
         let selected_output = pick_index(&outputs, config.output_device_name.as_deref());
 
         let initial_mode = config.mode_code.map(ChannelMode::from_code).unwrap_or(ChannelMode::Both);
@@ -143,6 +163,7 @@ impl App {
             show_settings: false,
             settings_pos: None,
             settings_frames: 0,
+            show_vb_cable_warning: !vb_cable_present,
         };
         app.restart_engine();
         app
@@ -421,6 +442,31 @@ impl eframe::App for App {
                 ui.label("Select an input and output device to start.");
             }
         });
+
+        if self.show_vb_cable_warning {
+            egui::Window::new("⚠ VB-Audio Virtual Cable Not Found")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_max_width(320.0);
+                    ui.label(
+                        "This app couldn't find a VB-Audio Virtual Cable recording \
+                         device, so it can't isolate audio yet.",
+                    );
+                    ui.add_space(8.0);
+                    ui.label("To fix this:");
+                    ui.horizontal(|ui| {
+                        ui.label("1.");
+                        ui.hyperlink_to("Download VB-Audio Virtual Cable", VB_CABLE_DOWNLOAD_URL);
+                    });
+                    ui.label("2. Reopen this app -- it will detect the cable automatically.");
+                    ui.add_space(8.0);
+                    if ui.button("OK").clicked() {
+                        self.show_vb_cable_warning = false;
+                    }
+                });
+        }
 
         if self.show_settings {
             let mut input_changed = false;
