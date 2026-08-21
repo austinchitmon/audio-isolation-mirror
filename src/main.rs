@@ -388,33 +388,8 @@ impl eframe::App for App {
             });
             ui.separator();
 
-            ui.label("Send your livestream into the cable");
+            ui.label("Select your browser");
             ui.horizontal(|ui| {
-                if ui
-                    .button("🔄")
-                    .on_hover_text("Detect apps with audio playing")
-                    .clicked()
-                {
-                    self.route_status = None;
-                    self.log("detecting active audio sessions...".to_string());
-                    match winaudio::list_active_render_sessions() {
-                        Ok(sessions) => {
-                            self.selected_session = None;
-                            self.error = None;
-                            self.log(format!("found {} active audio session(s)", sessions.len()));
-                            if sessions.is_empty() {
-                                self.set_error(
-                                    "No apps are currently playing audio. Start playback in \
-                                     your browser tab, then refresh again."
-                                        .to_string(),
-                                );
-                            }
-                            self.audio_sessions = sessions;
-                        }
-                        Err(e) => self.set_error(format!("Couldn't detect apps: {e}")),
-                    }
-                }
-
                 egui::ComboBox::from_id_salt("audio_session")
                     .selected_text(
                         self.selected_session
@@ -439,12 +414,37 @@ impl eframe::App for App {
                             }
                         }
                     });
+
+                if ui
+                    .button("🔄")
+                    .on_hover_text("Detect apps with audio playing")
+                    .clicked()
+                {
+                    self.route_status = None;
+                    self.log("detecting active audio sessions...".to_string());
+                    match winaudio::list_active_render_sessions() {
+                        Ok(sessions) => {
+                            self.selected_session = None;
+                            self.error = None;
+                            self.log(format!("found {} active audio session(s)", sessions.len()));
+                            if sessions.is_empty() {
+                                self.set_error(
+                                    "No apps are currently playing audio. Start playback in \
+                                     your browser tab, then refresh again."
+                                        .to_string(),
+                                );
+                            }
+                            self.audio_sessions = sessions;
+                        }
+                        Err(e) => self.set_error(format!("Couldn't detect apps: {e}")),
+                    }
+                }
             });
 
             if self.pending_route.is_some() {
                 ui.colored_label(egui::Color32::YELLOW, "Routing to CABLE Input...");
-            } else if let Some(status) = &self.route_status {
-                ui.colored_label(egui::Color32::GREEN, status);
+            } else if self.route_status.is_some() {
+                ui.colored_label(egui::Color32::GREEN, "Isolating");
             }
 
             ui.separator();
