@@ -48,6 +48,12 @@ struct ActiveRoute {
 /// checked in order, first match wins.
 const AUTO_ROUTE_CANDIDATES: [&str; 2] = ["firefox.exe", "chrome.exe"];
 
+const SETTINGS_SIZE: [f32; 2] = [360.0, 130.0];
+
+/// Which frame of the settings window's life to un-hide it on, once its
+/// requested size and position have actually been applied by the OS.
+const REVEAL_FRAME: u32 = 3;
+
 fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
     sessions.iter().position(|s| {
         AUTO_ROUTE_CANDIDATES
@@ -91,6 +97,9 @@ struct App {
     route_status: Option<String>,
     pending_route: Option<usize>,
     active_route: Option<ActiveRoute>,
+    show_settings: bool,
+    settings_pos: Option<egui::Pos2>,
+    settings_frames: u32,
 }
 
 impl App {
@@ -131,6 +140,9 @@ impl App {
             route_status: None,
             pending_route,
             active_route: None,
+            show_settings: false,
+            settings_pos: None,
+            settings_frames: 0,
         };
         app.restart_engine();
         app
@@ -245,30 +257,30 @@ impl eframe::App for App {
         self.process_pending_route();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Audio Channel Isolator");
-            ui.separator();
-
-            let mut device_changed = false;
-
-            ui.label("Input (capture from virtual cable)");
-            egui::ComboBox::from_id_salt("input_device")
-                .selected_text(
-                    self.selected_input
-                        .and_then(|i| self.inputs.get(i))
-                        .and_then(|d| d.name().ok())
-                        .unwrap_or_else(|| "<none>".to_string()),
-                )
-                .show_ui(ui, |ui| {
-                    for i in 0..self.inputs.len() {
-                        let name = self.inputs[i].name().unwrap_or_default();
-                        if ui
-                            .selectable_value(&mut self.selected_input, Some(i), name)
-                            .changed()
-                        {
-                            device_changed = true;
+            ui.horizontal(|ui| {
+                ui.heading("Audio Channel Isolator");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙").on_hover_text("Settings").clicked() {
+                        self.show_settings = !self.show_settings;
+                        if self.show_settings {
+                            self.settings_frames = 0;
+                            // Centered over the main window, rather than
+                            // wherever the OS would otherwise place it.
+                            self.settings_pos =
+                                ctx.input(|i| i.viewport().outer_rect).map(|r| {
+                                    r.center()
+                                        - egui::vec2(
+                                            SETTINGS_SIZE[0] / 2.0,
+                                            SETTINGS_SIZE[1] / 2.0,
+                                        )
+                                });
                         }
                     }
                 });
+            });
+            ui.separator();
+
+            let mut device_changed = false;
 
             ui.label("Output (your real headphones/speakers)");
             egui::ComboBox::from_id_salt("output_device")
@@ -409,6 +421,74 @@ impl eframe::App for App {
                 ui.label("Select an input and output device to start.");
             }
         });
+
+        if self.show_settings {
+            let mut input_changed = false;
+            let mut close_requested = false;
+
+            // Stays hidden for the first few frames: the OS briefly shows the
+            // window near fullscreen at its default spot before our size and
+            // position take effect, which flashes on screen.
+            let reveal = self.settings_frames >= REVEAL_FRAME;
+
+            // The main window is always-on-top; Settings must be too, or
+            // Windows' topmost z-order band forces it underneath.
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title("Settings")
+                .with_inner_size(SETTINGS_SIZE)
+                .with_always_on_top()
+                // No .with_active(): egui 0.29's ViewportBuilder::patch diffs
+                // `visible` against `active`, so setting both means the reveal
+                // below never reaches the OS and the window stays hidden.
+                .with_visible(reveal);
+            if let Some(pos) = self.settings_pos {
+                builder = builder.with_position(pos);
+            }
+
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("settings_viewport"),
+                builder,
+                |ctx, _class| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.label("Input (capture from virtual cable)");
+                        egui::ComboBox::from_id_salt("input_device")
+                            .selected_text(
+                                self.selected_input
+                                    .and_then(|i| self.inputs.get(i))
+                                    .and_then(|d| d.name().ok())
+                                    .unwrap_or_else(|| "<none>".to_string()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for i in 0..self.inputs.len() {
+                                    let name = self.inputs[i].name().unwrap_or_default();
+                                    if ui
+                                        .selectable_value(&mut self.selected_input, Some(i), name)
+                                        .changed()
+                                    {
+                                        input_changed = true;
+                                    }
+                                }
+                            });
+                    });
+
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        close_requested = true;
+                    }
+                },
+            );
+
+            if !reveal {
+                self.settings_frames += 1;
+                ctx.request_repaint();
+            }
+
+            if input_changed {
+                self.restart_engine();
+            }
+            if close_requested {
+                self.show_settings = false;
+            }
+        }
 
         // Stream errors arrive on a background audio thread with no repaint of
         // their own; poll periodically so a mid-stream disconnect shows up promptly.
