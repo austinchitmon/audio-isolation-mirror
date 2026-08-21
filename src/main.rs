@@ -44,6 +44,18 @@ struct ActiveRoute {
     original: EndpointOverride,
 }
 
+/// Processes we assume the user wants isolated without having to ask --
+/// checked in order, first match wins.
+const AUTO_ROUTE_CANDIDATES: [&str; 2] = ["firefox.exe", "chrome.exe"];
+
+fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
+    sessions.iter().position(|s| {
+        AUTO_ROUTE_CANDIDATES
+            .iter()
+            .any(|name| s.exe_name.eq_ignore_ascii_case(name))
+    })
+}
+
 fn pick_index(devices: &[cpal::Device], preferred_name: Option<&str>) -> Option<usize> {
     if let Some(name) = preferred_name {
         let needle = name.to_lowercase();
@@ -96,6 +108,12 @@ impl App {
         let muted = config.muted;
         let mute_handle = MuteHandle::new(muted);
 
+        // Pre-fetch active audio sessions so a running browser can be
+        // auto-routed without the user having to hit refresh first.
+        let audio_sessions = winaudio::list_active_render_sessions().unwrap_or_default();
+        let selected_session = find_auto_route_candidate(&audio_sessions);
+        let pending_route = selected_session;
+
         let mut app = Self {
             inputs,
             outputs,
@@ -108,10 +126,10 @@ impl App {
             mute_handle,
             engine: None,
             error: None,
-            audio_sessions: Vec::new(),
-            selected_session: None,
+            audio_sessions,
+            selected_session,
             route_status: None,
-            pending_route: None,
+            pending_route,
             active_route: None,
         };
         app.restart_engine();
