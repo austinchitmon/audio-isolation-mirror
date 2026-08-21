@@ -8,7 +8,10 @@ mod winaudio;
 use cpal::traits::DeviceTrait;
 use eframe::egui;
 
-use audio::{list_input_devices, list_output_devices, AudioEngine, ModeHandle, MuteHandle};
+use audio::{
+    default_output_device_name, list_input_devices, list_output_devices, AudioEngine, ModeHandle,
+    MuteHandle,
+};
 use dsp::ChannelMode;
 use winaudio::{AudioSession, EndpointOverride};
 
@@ -48,7 +51,7 @@ struct ActiveRoute {
 /// checked in order, first match wins.
 const AUTO_ROUTE_CANDIDATES: [&str; 2] = ["firefox.exe", "chrome.exe"];
 
-const SETTINGS_SIZE: [f32; 2] = [360.0, 130.0];
+const SETTINGS_SIZE: [f32; 2] = [360.0, 200.0];
 
 /// Which frame of the settings window's life to un-hide it on, once its
 /// requested size and position have actually been applied by the OS.
@@ -75,19 +78,6 @@ fn find_by_name(devices: &[cpal::Device], name: &str) -> Option<usize> {
             .map(|n| n.to_lowercase().contains(&needle))
             .unwrap_or(false)
     })
-}
-
-fn pick_index(devices: &[cpal::Device], preferred_name: Option<&str>) -> Option<usize> {
-    if let Some(name) = preferred_name {
-        if let Some(i) = find_by_name(devices, name) {
-            return Some(i);
-        }
-    }
-    if devices.is_empty() {
-        None
-    } else {
-        Some(0)
-    }
 }
 
 struct App {
@@ -129,7 +119,14 @@ impl App {
             .and_then(|name| find_by_name(&inputs, name))
             .or_else(|| find_by_name(&inputs, VB_CABLE_NAME_HINT))
             .or(if inputs.is_empty() { None } else { Some(0) });
-        let selected_output = pick_index(&outputs, config.output_device_name.as_deref());
+        // Same idea for output: prefer a saved choice, otherwise assume the
+        // user wants whatever the OS considers the default playback device.
+        let selected_output = config
+            .output_device_name
+            .as_deref()
+            .and_then(|name| find_by_name(&outputs, name))
+            .or_else(|| default_output_device_name().and_then(|name| find_by_name(&outputs, &name)))
+            .or(if outputs.is_empty() { None } else { Some(0) });
 
         let initial_mode = config.mode_code.map(ChannelMode::from_code).unwrap_or(ChannelMode::Both);
         let (channel, mirror) = decompose(initial_mode);
@@ -301,33 +298,6 @@ impl eframe::App for App {
             });
             ui.separator();
 
-            let mut device_changed = false;
-
-            ui.label("Output (your real headphones/speakers)");
-            egui::ComboBox::from_id_salt("output_device")
-                .selected_text(
-                    self.selected_output
-                        .and_then(|i| self.outputs.get(i))
-                        .and_then(|d| d.name().ok())
-                        .unwrap_or_else(|| "<none>".to_string()),
-                )
-                .show_ui(ui, |ui| {
-                    for i in 0..self.outputs.len() {
-                        let name = self.outputs[i].name().unwrap_or_default();
-                        if ui
-                            .selectable_value(&mut self.selected_output, Some(i), name)
-                            .changed()
-                        {
-                            device_changed = true;
-                        }
-                    }
-                });
-
-            if device_changed {
-                self.restart_engine();
-            }
-
-            ui.separator();
             ui.label("Send your livestream into the cable");
             ui.horizontal(|ui| {
                 if ui
@@ -469,7 +439,7 @@ impl eframe::App for App {
         }
 
         if self.show_settings {
-            let mut input_changed = false;
+            let mut device_changed = false;
             let mut close_requested = false;
 
             // Stays hidden for the first few frames: the OS briefly shows the
@@ -511,7 +481,28 @@ impl eframe::App for App {
                                         .selectable_value(&mut self.selected_input, Some(i), name)
                                         .changed()
                                     {
-                                        input_changed = true;
+                                        device_changed = true;
+                                    }
+                                }
+                            });
+
+                        ui.add_space(8.0);
+                        ui.label("Output (your real headphones/speakers)");
+                        egui::ComboBox::from_id_salt("output_device")
+                            .selected_text(
+                                self.selected_output
+                                    .and_then(|i| self.outputs.get(i))
+                                    .and_then(|d| d.name().ok())
+                                    .unwrap_or_else(|| "<none>".to_string()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for i in 0..self.outputs.len() {
+                                    let name = self.outputs[i].name().unwrap_or_default();
+                                    if ui
+                                        .selectable_value(&mut self.selected_output, Some(i), name)
+                                        .changed()
+                                    {
+                                        device_changed = true;
                                     }
                                 }
                             });
@@ -528,7 +519,7 @@ impl eframe::App for App {
                 ctx.request_repaint();
             }
 
-            if input_changed {
+            if device_changed {
                 self.restart_engine();
             }
             if close_requested {

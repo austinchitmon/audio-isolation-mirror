@@ -158,6 +158,13 @@ pub fn list_output_devices() -> Vec<Device> {
         .unwrap_or_default()
 }
 
+/// The name of the OS's current default playback device (e.g. whatever the
+/// user picked in Windows' Sound settings), so we can assume that's what
+/// they want to actually listen on without asking.
+pub fn default_output_device_name() -> Option<String> {
+    cpal::default_host().default_output_device()?.name().ok()
+}
+
 /// Owns the live input+output cpal streams. Dropping this stops audio.
 pub struct AudioEngine {
     _input_stream: cpal::Stream,
