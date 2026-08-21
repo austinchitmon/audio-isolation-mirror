@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub muted: bool,
     #[serde(default)]
     pub dev_console: bool,
+    #[serde(default)]
+    pub simple_browser_selection: bool,
 }
 
 fn config_path() -> Option<PathBuf> {

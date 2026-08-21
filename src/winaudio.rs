@@ -23,13 +23,18 @@ use std::ffi::c_void;
 use std::sync::Once;
 
 use anyhow::{anyhow, Context, Result};
-use windows::core::{Interface, GUID, HRESULT, HSTRING, PWSTR};
+use windows::core::{Interface, GUID, HRESULT, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH};
+use windows::Win32::Graphics::Gdi::{
+    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, RGBQUAD,
+};
 use windows::Win32::Media::Audio::{
     eConsole, eMultimedia, eRender, EDataFlow, ERole, IAudioSessionControl2, IAudioSessionManager2,
     IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED, STGM_READ,
 };
@@ -37,6 +42,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::System::WinRT::RoGetActivationFactory;
+use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
 
 /// Ensures COM is initialized on the calling (UI) thread. Safe to call
 /// repeatedly; never uninitializes, since this is a long-lived GUI thread
@@ -56,9 +63,13 @@ fn ensure_com_initialized() {
 pub struct AudioSession {
     pub pid: u32,
     pub exe_name: String,
+    /// Full path to the executable, e.g. for icon extraction. Empty if it
+    /// couldn't be looked up (process exited, access denied, etc).
+    pub exe_path: String,
 }
 
-fn exe_name_for_pid(pid: u32) -> Option<String> {
+/// Returns (exe_name, full_path) for `pid`, e.g. ("firefox.exe", "C:\\...\\firefox.exe").
+fn exe_info_for_pid(pid: u32) -> Option<(String, String)> {
     unsafe {
         let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; MAX_PATH as usize];
@@ -73,7 +84,92 @@ fn exe_name_for_pid(pid: u32) -> Option<String> {
         result.ok()?;
 
         let path = String::from_utf16_lossy(&buf[..len as usize]);
-        path.rsplit(['\\', '/']).next().map(|s| s.to_string())
+        let name = path.rsplit(['\\', '/']).next()?.to_string();
+        Some((name, path))
+    }
+}
+
+/// Extracts the icon embedded in `exe_path`'s own executable file -- the
+/// same icon Explorer shows for it -- as straight (non-premultiplied) RGBA
+/// bytes plus width and height. Returns `None` on any failure; callers
+/// should treat a missing icon as "just don't show one", not an error.
+pub fn extract_exe_icon_rgba(exe_path: &str) -> Option<(Vec<u8>, u32, u32)> {
+    unsafe {
+        let wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut shfi = SHFILEINFOW::default();
+        let result = SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut shfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        );
+        if result == 0 || shfi.hIcon.is_invalid() {
+            return None;
+        }
+        let hicon = shfi.hIcon;
+
+        let mut icon_info = ICONINFO::default();
+        if GetIconInfo(hicon, &mut icon_info).is_err() {
+            let _ = DestroyIcon(hicon);
+            return None;
+        }
+        // Not needed: modern app icons are 32bpp with a real alpha channel
+        // in hbmColor, so the 1bpp mask bitmap goes unused.
+        let _ = DeleteObject(icon_info.hbmMask);
+
+        let mut bitmap = BITMAP::default();
+        let wrote = GetObjectW(
+            icon_info.hbmColor,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bitmap as *mut _ as *mut c_void),
+        );
+        if wrote == 0 {
+            let _ = DeleteObject(icon_info.hbmColor);
+            let _ = DestroyIcon(hicon);
+            return None;
+        }
+        let width = bitmap.bmWidth as u32;
+        let height = bitmap.bmHeight as u32;
+
+        let mut buffer = vec![0u8; (width * height * 4) as usize];
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32), // negative = top-down rows
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }],
+        };
+
+        let hdc = GetDC(None);
+        let lines = GetDIBits(
+            hdc,
+            icon_info.hbmColor,
+            0,
+            height,
+            Some(buffer.as_mut_ptr() as *mut c_void),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(None, hdc);
+        let _ = DeleteObject(icon_info.hbmColor);
+        let _ = DestroyIcon(hicon);
+
+        if lines == 0 {
+            return None;
+        }
+
+        // GetDIBits fills BGRA; egui wants RGBA.
+        for px in buffer.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+
+        Some((buffer, width, height))
     }
 }
 
@@ -122,9 +218,10 @@ pub fn list_active_render_sessions() -> Result<Vec<AudioSession>> {
 
         Ok(pids
             .into_iter()
-            .map(|pid| AudioSession {
-                pid,
-                exe_name: exe_name_for_pid(pid).unwrap_or_else(|| format!("<pid {pid}>")),
+            .map(|pid| {
+                let (exe_name, exe_path) = exe_info_for_pid(pid)
+                    .unwrap_or_else(|| (format!("<pid {pid}>"), String::new()));
+                AudioSession { pid, exe_name, exe_path }
             })
             .collect())
     }

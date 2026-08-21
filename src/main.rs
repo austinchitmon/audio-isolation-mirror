@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 mod audio;
 mod config;
@@ -49,11 +49,12 @@ struct ActiveRoute {
     original: EndpointOverride,
 }
 
-/// Processes we assume the user wants isolated without having to ask --
-/// checked in order, first match wins.
-const AUTO_ROUTE_CANDIDATES: [&str; 2] = ["firefox.exe", "chrome.exe"];
+/// Common browser process names -- used both to auto-route on launch without
+/// asking, and (when Simple Browser Selection is on) as the fixed set of
+/// icons shown instead of the full running-process dropdown.
+const KNOWN_BROWSERS: [&str; 5] = ["chrome.exe", "firefox.exe", "msedge.exe", "brave.exe", "opera.exe"];
 
-const SETTINGS_SIZE: [f32; 2] = [360.0, 240.0];
+const SETTINGS_SIZE: [f32; 2] = [360.0, 280.0];
 
 /// Which frame of the settings window's life to un-hide it on, once its
 /// requested size and position have actually been applied by the OS.
@@ -81,7 +82,7 @@ fn list_audio_sessions() -> anyhow::Result<Vec<AudioSession>> {
 
 fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
     sessions.iter().position(|s| {
-        AUTO_ROUTE_CANDIDATES
+        KNOWN_BROWSERS
             .iter()
             .any(|name| s.exe_name.eq_ignore_ascii_case(name))
     })
@@ -119,6 +120,12 @@ struct App {
     show_vb_cable_warning: bool,
     dev_console: bool,
     dev_log: VecDeque<String>,
+    simple_browser_selection: bool,
+    /// Icon textures for `KNOWN_BROWSERS`, loaded lazily and cached by exe
+    /// name the first time each browser actually shows up in the session
+    /// list -- keeps this out of the hot path for users who never enable
+    /// Simple Browser Selection.
+    browser_icons: HashMap<String, Option<egui::TextureHandle>>,
 }
 
 impl App {
@@ -215,6 +222,8 @@ impl App {
             show_vb_cable_warning: !vb_cable_present,
             dev_console: config.dev_console,
             dev_log,
+            simple_browser_selection: config.simple_browser_selection,
+            browser_icons: HashMap::new(),
         };
         app.restart_engine();
         app
@@ -270,6 +279,7 @@ impl App {
             mode_code: Some(effective_mode(self.channel, self.mirror).to_code()),
             muted: self.muted,
             dev_console: self.dev_console,
+            simple_browser_selection: self.simple_browser_selection,
         }
         .save();
     }
@@ -296,6 +306,31 @@ impl App {
         let msg = msg.into();
         self.log(msg.clone());
         self.route_status = Some(msg);
+    }
+
+    /// Returns the cached icon texture for a `KNOWN_BROWSERS` exe, extracting
+    /// it from `exe_path` and caching the result (including a cached "no
+    /// icon" on failure) the first time this exe name is seen.
+    fn browser_icon_texture(
+        &mut self,
+        ctx: &egui::Context,
+        exe_name: &str,
+        exe_path: &str,
+    ) -> Option<egui::TextureHandle> {
+        let key = exe_name.to_lowercase();
+        if let Some(cached) = self.browser_icons.get(&key) {
+            return cached.clone();
+        }
+
+        let texture = winaudio::extract_exe_icon_rgba(exe_path).map(|(rgba, w, h)| {
+            let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            ctx.load_texture(key.clone(), image, egui::TextureOptions::default())
+        });
+        if texture.is_none() {
+            self.log(format!("couldn't extract icon for {exe_name}"));
+        }
+        self.browser_icons.insert(key, texture.clone());
+        texture
     }
 
     /// Actually performs the routing for `pending_route`, if any was queued
@@ -400,30 +435,74 @@ impl eframe::App for App {
 
             ui.label("Select your browser");
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("audio_session")
-                    .selected_text(
-                        self.selected_session
-                            .and_then(|i| self.audio_sessions.get(i))
-                            .map(|s| format!("{} (pid {})", s.exe_name, s.pid))
-                            .unwrap_or_else(|| "<none detected>".to_string()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for i in 0..self.audio_sessions.len() {
-                            let label = format!(
-                                "{} (pid {})",
-                                self.audio_sessions[i].exe_name, self.audio_sessions[i].pid
-                            );
-                            if ui
-                                .selectable_value(&mut self.selected_session, Some(i), label)
-                                .changed()
-                            {
-                                self.route_status = None;
-                                self.error = None;
-                                self.pending_route = Some(i);
-                                ctx.request_repaint();
+                if self.simple_browser_selection {
+                    let mut any_shown = false;
+                    for &browser in KNOWN_BROWSERS.iter() {
+                        let Some(idx) = self
+                            .audio_sessions
+                            .iter()
+                            .position(|s| s.exe_name.eq_ignore_ascii_case(browser))
+                        else {
+                            continue;
+                        };
+                        any_shown = true;
+                        let session = &self.audio_sessions[idx];
+                        let exe_path = session.exe_path.clone();
+                        let hover = format!("{} (pid {})", session.exe_name, session.pid);
+                        let selected = self.selected_session == Some(idx);
+
+                        let clicked = match self.browser_icon_texture(ctx, browser, &exe_path) {
+                            Some(texture) => {
+                                let image = egui::Image::new(&texture)
+                                    .fit_to_exact_size(egui::vec2(28.0, 28.0));
+                                ui.add(egui::ImageButton::new(image).selected(selected))
+                                    .on_hover_text(hover)
+                                    .clicked()
                             }
+                            // No icon could be extracted -- fall back to a
+                            // plain text toggle rather than showing nothing.
+                            None => ui
+                                .add(egui::SelectableLabel::new(selected, browser))
+                                .on_hover_text(hover)
+                                .clicked(),
+                        };
+
+                        if clicked && !selected {
+                            self.route_status = None;
+                            self.error = None;
+                            self.pending_route = Some(idx);
+                            ctx.request_repaint();
                         }
-                    });
+                    }
+                    if !any_shown {
+                        ui.weak("No supported browser detected");
+                    }
+                } else {
+                    egui::ComboBox::from_id_salt("audio_session")
+                        .selected_text(
+                            self.selected_session
+                                .and_then(|i| self.audio_sessions.get(i))
+                                .map(|s| format!("{} (pid {})", s.exe_name, s.pid))
+                                .unwrap_or_else(|| "<none detected>".to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for i in 0..self.audio_sessions.len() {
+                                let label = format!(
+                                    "{} (pid {})",
+                                    self.audio_sessions[i].exe_name, self.audio_sessions[i].pid
+                                );
+                                if ui
+                                    .selectable_value(&mut self.selected_session, Some(i), label)
+                                    .changed()
+                                {
+                                    self.route_status = None;
+                                    self.error = None;
+                                    self.pending_route = Some(i);
+                                    ctx.request_repaint();
+                                }
+                            }
+                        });
+                }
 
                 if ui
                     .button("🔄")
@@ -627,6 +706,21 @@ impl eframe::App for App {
                             });
 
                         ui.add_space(8.0);
+                        ui.separator();
+                        if ui
+                            .checkbox(&mut self.simple_browser_selection, "Simple Browser Selection")
+                            .on_hover_text(
+                                "Instead of a dropdown listing every process currently playing \
+                                 audio, shows one icon per common browser (Chrome, Firefox, Edge, \
+                                 Brave, Opera) that's currently playing audio. Click an icon to \
+                                 isolate that browser -- same effect as picking it from the \
+                                 dropdown, just fewer options to read through.",
+                            )
+                            .changed()
+                        {
+                            self.save_config();
+                        }
+
                         ui.separator();
                         if ui.checkbox(&mut self.dev_console, "Developer Console").changed() {
                             self.save_config();
