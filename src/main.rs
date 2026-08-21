@@ -245,7 +245,7 @@ impl eframe::App for App {
         self.process_pending_route();
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Big Brother Channel Isolator");
+            ui.heading("Audio Channel Isolator");
             ui.separator();
 
             let mut device_changed = false;
@@ -428,7 +428,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "Big Brother Channel Isolator",
+        "Audio Channel Isolator",
         options,
         Box::new(|_cc| Ok(Box::new(App::new()))),
     )
