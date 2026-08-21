@@ -69,6 +69,16 @@ const VB_CABLE_DOWNLOAD_URL: &str = "https://vb-audio.com/Cable/";
 /// oldest -- unbounded growth over a long-running session isn't worth it.
 const DEV_LOG_MAX_LINES: usize = 200;
 
+/// Lists active audio sessions, excluding this app's own process -- routing
+/// yourself into CABLE Input is never something a user would want to pick.
+fn list_audio_sessions() -> anyhow::Result<Vec<AudioSession>> {
+    let self_pid = std::process::id();
+    Ok(winaudio::list_active_render_sessions()?
+        .into_iter()
+        .filter(|s| s.pid != self_pid)
+        .collect())
+}
+
 fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
     sessions.iter().position(|s| {
         AUTO_ROUTE_CANDIDATES
@@ -170,7 +180,7 @@ impl App {
         // Pre-fetch active audio sessions so a running browser can be
         // auto-routed without the user having to hit refresh first.
         startup_log("checking for active Firefox/Chrome audio sessions...".to_string());
-        let audio_sessions = winaudio::list_active_render_sessions().unwrap_or_default();
+        let audio_sessions = list_audio_sessions().unwrap_or_default();
         let selected_session = find_auto_route_candidate(&audio_sessions);
         startup_log(match selected_session.and_then(|i| audio_sessions.get(i)) {
             Some(s) => format!("auto-selected {} (pid {}) for routing", s.exe_name, s.pid),
@@ -429,7 +439,7 @@ impl eframe::App for App {
                         .and_then(|i| self.audio_sessions.get(i))
                         .map(|s| s.pid);
 
-                    match winaudio::list_active_render_sessions() {
+                    match list_audio_sessions() {
                         Ok(sessions) => {
                             self.error = None;
                             self.log(format!("found {} active audio session(s)", sessions.len()));
