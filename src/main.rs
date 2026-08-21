@@ -420,11 +420,17 @@ impl eframe::App for App {
                     .on_hover_text("Detect apps with audio playing")
                     .clicked()
                 {
-                    self.route_status = None;
                     self.log("detecting active audio sessions...".to_string());
+                    // Re-detecting shouldn't drop the current selection out
+                    // from under the user if that process is still there --
+                    // only its index into the (freshly rebuilt) list changes.
+                    let selected_pid = self
+                        .selected_session
+                        .and_then(|i| self.audio_sessions.get(i))
+                        .map(|s| s.pid);
+
                     match winaudio::list_active_render_sessions() {
                         Ok(sessions) => {
-                            self.selected_session = None;
                             self.error = None;
                             self.log(format!("found {} active audio session(s)", sessions.len()));
                             if sessions.is_empty() {
@@ -435,6 +441,11 @@ impl eframe::App for App {
                                 );
                             }
                             self.audio_sessions = sessions;
+                            self.selected_session = selected_pid
+                                .and_then(|pid| self.audio_sessions.iter().position(|s| s.pid == pid));
+                            if self.selected_session.is_none() {
+                                self.route_status = None;
+                            }
                         }
                         Err(e) => self.set_error(format!("Couldn't detect apps: {e}")),
                     }
