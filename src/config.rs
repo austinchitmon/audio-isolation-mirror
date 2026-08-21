@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub mode_code: Option<u8>,
     #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
+    pub dev_console: bool,
 }
 
 fn config_path() -> Option<PathBuf> {

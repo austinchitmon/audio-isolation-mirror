@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"]
 
+use std::collections::VecDeque;
+
 mod audio;
 mod config;
 mod dsp;
@@ -51,7 +53,7 @@ struct ActiveRoute {
 /// checked in order, first match wins.
 const AUTO_ROUTE_CANDIDATES: [&str; 2] = ["firefox.exe", "chrome.exe"];
 
-const SETTINGS_SIZE: [f32; 2] = [360.0, 200.0];
+const SETTINGS_SIZE: [f32; 2] = [360.0, 240.0];
 
 /// Which frame of the settings window's life to un-hide it on, once its
 /// requested size and position have actually been applied by the OS.
@@ -62,6 +64,10 @@ const REVEAL_FRAME: u32 = 3;
 const VB_CABLE_NAME_HINT: &str = "VB-Audio Virtual Cable";
 
 const VB_CABLE_DOWNLOAD_URL: &str = "https://vb-audio.com/Cable/";
+
+/// How many recent lines the developer console keeps before dropping the
+/// oldest -- unbounded growth over a long-running session isn't worth it.
+const DEV_LOG_MAX_LINES: usize = 200;
 
 fn find_auto_route_candidate(sessions: &[AudioSession]) -> Option<usize> {
     sessions.iter().position(|s| {
@@ -101,10 +107,20 @@ struct App {
     settings_pos: Option<egui::Pos2>,
     settings_frames: u32,
     show_vb_cable_warning: bool,
+    dev_console: bool,
+    dev_log: VecDeque<String>,
 }
 
 impl App {
     fn new() -> Self {
+        // Buffers startup log points; self doesn't exist yet for `self.log`
+        // to write into, so this gets folded into `dev_log` once it does.
+        let mut dev_log: VecDeque<String> = VecDeque::new();
+        let mut startup_log = |msg: String| {
+            eprintln!("{msg}");
+            dev_log.push_back(msg);
+        };
+
         let inputs = list_input_devices();
         let outputs = list_output_devices();
         let config = config::AppConfig::load();
@@ -112,7 +128,13 @@ impl App {
         // Prefer whatever the user explicitly picked last time; otherwise
         // assume VB-Audio Virtual Cable is installed and find it ourselves,
         // so non-technical users never have to open Settings at all.
+        startup_log("searching for VB-Audio Virtual Cable...".to_string());
         let vb_cable_present = find_by_name(&inputs, VB_CABLE_NAME_HINT).is_some();
+        startup_log(if vb_cable_present {
+            "found VB-Audio Virtual Cable".to_string()
+        } else {
+            "VB-Audio Virtual Cable not found".to_string()
+        });
         let selected_input = config
             .input_device_name
             .as_deref()
@@ -127,6 +149,17 @@ impl App {
             .and_then(|name| find_by_name(&outputs, name))
             .or_else(|| default_output_device_name().and_then(|name| find_by_name(&outputs, &name)))
             .or(if outputs.is_empty() { None } else { Some(0) });
+        startup_log(format!(
+            "selected input: {}, output: {}",
+            selected_input
+                .and_then(|i| inputs.get(i))
+                .and_then(|d| d.name().ok())
+                .unwrap_or_else(|| "<none>".to_string()),
+            selected_output
+                .and_then(|i| outputs.get(i))
+                .and_then(|d| d.name().ok())
+                .unwrap_or_else(|| "<none>".to_string()),
+        ));
 
         let initial_mode = config.mode_code.map(ChannelMode::from_code).unwrap_or(ChannelMode::Both);
         let (channel, mirror) = decompose(initial_mode);
@@ -136,9 +169,18 @@ impl App {
 
         // Pre-fetch active audio sessions so a running browser can be
         // auto-routed without the user having to hit refresh first.
+        startup_log("checking for active Firefox/Chrome audio sessions...".to_string());
         let audio_sessions = winaudio::list_active_render_sessions().unwrap_or_default();
         let selected_session = find_auto_route_candidate(&audio_sessions);
+        startup_log(match selected_session.and_then(|i| audio_sessions.get(i)) {
+            Some(s) => format!("auto-selected {} (pid {}) for routing", s.exe_name, s.pid),
+            None => "no Firefox/Chrome session found to auto-route".to_string(),
+        });
         let pending_route = selected_session;
+
+        while dev_log.len() > DEV_LOG_MAX_LINES {
+            dev_log.pop_front();
+        }
 
         let mut app = Self {
             inputs,
@@ -161,6 +203,8 @@ impl App {
             settings_pos: None,
             settings_frames: 0,
             show_vb_cable_warning: !vb_cable_present,
+            dev_console: config.dev_console,
+            dev_log,
         };
         app.restart_engine();
         app
@@ -170,13 +214,30 @@ impl App {
         self.engine = None; // drop old streams before starting new ones
         self.error = None;
 
+        let input_name = self
+            .selected_input
+            .and_then(|i| self.inputs.get(i))
+            .and_then(|d| d.name().ok());
+        let output_name = self
+            .selected_output
+            .and_then(|i| self.outputs.get(i))
+            .and_then(|d| d.name().ok());
+        if let (Some(input_name), Some(output_name)) = (&input_name, &output_name) {
+            self.log(format!(
+                "starting audio engine: input={input_name}, output={output_name}"
+            ));
+        }
+
         let input = self.selected_input.and_then(|i| self.inputs.get(i));
         let output = self.selected_output.and_then(|i| self.outputs.get(i));
 
         if let (Some(input), Some(output)) = (input, output) {
             match AudioEngine::start(input, output, self.mode_handle.clone(), self.mute_handle.clone()) {
-                Ok(engine) => self.engine = Some(engine),
-                Err(e) => self.error = Some(e.to_string()),
+                Ok(engine) => {
+                    self.engine = Some(engine);
+                    self.log("audio engine started".to_string());
+                }
+                Err(e) => self.set_error(e.to_string()),
             }
         }
 
@@ -198,8 +259,33 @@ impl App {
             output_device_name,
             mode_code: Some(effective_mode(self.channel, self.mirror).to_code()),
             muted: self.muted,
+            dev_console: self.dev_console,
         }
         .save();
+    }
+
+    /// Appends a line to the developer console, dropping the oldest once it
+    /// grows past `DEV_LOG_MAX_LINES`. Also printed to stderr so it's still
+    /// visible when run from a terminal with the console hidden.
+    fn log(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        eprintln!("{msg}");
+        self.dev_log.push_back(msg);
+        if self.dev_log.len() > DEV_LOG_MAX_LINES {
+            self.dev_log.pop_front();
+        }
+    }
+
+    fn set_error(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.log(format!("error: {msg}"));
+        self.error = Some(msg);
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.log(msg.clone());
+        self.route_status = Some(msg);
     }
 
     /// Actually performs the routing for `pending_route`, if any was queued
@@ -211,6 +297,7 @@ impl App {
         let Some(session) = self.audio_sessions.get(idx) else { return };
         let pid = session.pid;
         let exe_name = session.exe_name.clone();
+        self.log(format!("routing {exe_name} (pid {pid}) to CABLE Input"));
 
         // Put whichever app we previously routed back the way it was before
         // routing this newly-selected one.
@@ -219,7 +306,7 @@ impl App {
         let original = match winaudio::get_endpoint_override(pid) {
             Ok(original) => original,
             Err(e) => {
-                self.error = Some(format!(
+                self.set_error(format!(
                     "Couldn't read {exe_name}'s current audio routing: {e}"
                 ));
                 return;
@@ -230,14 +317,14 @@ impl App {
             Ok(Some(device_id)) => match winaudio::route_process_to_endpoint(pid, &device_id) {
                 Ok(()) => {
                     self.error = None;
-                    self.route_status = Some(format!(
+                    self.set_status(format!(
                         "{exe_name} is now routed to CABLE Input. If you don't hear it \
                          come through yet, refresh/restart playback in that app."
                     ));
                     self.active_route = Some(ActiveRoute { pid, exe_name, original });
                 }
                 Err(e) => {
-                    self.error = Some(format!(
+                    self.set_error(format!(
                         "Automatic app routing isn't available on this Windows version ({e}). \
                          Route manually instead: Settings -> System -> Sound -> Volume mixer \
                          -> set your browser's output to 'CABLE Input'."
@@ -245,14 +332,14 @@ impl App {
                 }
             },
             Ok(None) => {
-                self.error = Some(
+                self.set_error(
                     "Couldn't find a 'CABLE Input' playback device -- is \
                      VB-Audio Virtual Cable installed?"
                         .to_string(),
                 );
             }
             Err(e) => {
-                self.error = Some(format!("Couldn't look up the CABLE Input device: {e}"));
+                self.set_error(format!("Couldn't look up the CABLE Input device: {e}"));
             }
         }
     }
@@ -264,7 +351,10 @@ impl App {
     fn restore_active_route(&mut self) {
         if let Some(prev) = self.active_route.take() {
             if let Err(e) = winaudio::restore_endpoint(prev.pid, &prev.original) {
-                eprintln!("failed to restore {}'s audio routing: {e}", prev.exe_name);
+                self.log(format!(
+                    "failed to restore {}'s audio routing: {e}",
+                    prev.exe_name
+                ));
             }
         }
     }
@@ -306,12 +396,14 @@ impl eframe::App for App {
                     .clicked()
                 {
                     self.route_status = None;
+                    self.log("detecting active audio sessions...".to_string());
                     match winaudio::list_active_render_sessions() {
                         Ok(sessions) => {
                             self.selected_session = None;
                             self.error = None;
+                            self.log(format!("found {} active audio session(s)", sessions.len()));
                             if sessions.is_empty() {
-                                self.error = Some(
+                                self.set_error(
                                     "No apps are currently playing audio. Start playback in \
                                      your browser tab, then refresh again."
                                         .to_string(),
@@ -319,7 +411,7 @@ impl eframe::App for App {
                             }
                             self.audio_sessions = sessions;
                         }
-                        Err(e) => self.error = Some(format!("Couldn't detect apps: {e}")),
+                        Err(e) => self.set_error(format!("Couldn't detect apps: {e}")),
                     }
                 }
 
@@ -398,18 +490,24 @@ impl eframe::App for App {
             // was unplugged mid-stream) so they surface here instead of only stderr.
             if let Some(engine) = &self.engine {
                 if let Some(err) = engine.take_error() {
-                    self.error = Some(err);
+                    self.set_error(err);
                     self.engine = None;
                 }
             }
 
-            ui.separator();
-            if let Some(err) = &self.error {
-                ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
-            } else if self.engine.is_some() {
-                ui.colored_label(egui::Color32::GREEN, "Running");
-            } else {
-                ui.label("Select an input and output device to start.");
+            // Base users get no further feedback here -- everything below is
+            // diagnostic and only appears once Developer Console is on.
+            if self.dev_console {
+                ui.separator();
+                ui.label("Developer Console");
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.dev_log {
+                            ui.monospace(line);
+                        }
+                    });
             }
         });
 
@@ -506,6 +604,12 @@ impl eframe::App for App {
                                     }
                                 }
                             });
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        if ui.checkbox(&mut self.dev_console, "Developer Console").changed() {
+                            self.save_config();
+                        }
                     });
 
                     if ctx.input(|i| i.viewport().close_requested()) {
