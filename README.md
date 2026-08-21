@@ -26,22 +26,28 @@ Browser (livestream tab)
   -> this app renders to your real headphones/speakers
 ```
 
-The "Route to CABLE Input" button in the app does the routing step for you, using the same (undocumented) per-app audio routing mechanism Windows' own Volume Mixer uses internally. It has no official warranty from Microsoft, so it can occasionally fail on a given Windows build — the manual Volume Mixer method above always works as a fallback.
+Selecting an app from the list in the app routes it immediately, using the same (undocumented) per-app audio routing mechanism Windows' own Volume Mixer uses internally. It has no official warranty from Microsoft, so it can occasionally fail on a given Windows build — the manual Volume Mixer method above always works as a fallback.
 
 ## Quick Start (for viewers)
 
 You only need to do this once.
 
-1. **Install VB-Audio Virtual Cable** (free): [vb-audio.com/Cable](https://vb-audio.com/Cable/). It's a driver-only install — there's no Start Menu entry, and that's normal. To confirm it worked, open Settings → Sound and look for **"CABLE Input"** under Output devices and **"CABLE Output"** under Input devices.
+1. **Install VB-Audio Virtual Cable** (free): [vb-audio.com/Cable](https://vb-audio.com/Cable/). It's a driver-only install — there's no Start Menu entry, and that's normal. If you skip this, the app will tell you on launch and link you back here.
 2. **Download the app**: go to the [Releases](https://github.com/austinchitmon/audio-isolation-mirror/releases) page and download `audio_isolation_mirror.exe` (the latest version, at the top).
 3. **Run it**: double-click the file you downloaded. Windows will likely show a blue **"Windows protected your PC"** screen — this is expected for any small app that isn't from a big paid publisher, and does not mean anything is wrong. Click **More info**, then click **Run anyway**.
-4. **Pick your devices** in the app window that opens:
-   - **Input**: "CABLE Output (VB-Audio Virtual Cable)"
-   - **Output**: your real headphones or speakers
-5. **Send your livestream into the cable**: start playback in your browser tab first, then in the app click **Detect apps with audio playing**, select your browser from the list, and click **Route to CABLE Input**. This routes the app going forward, but usually won't move audio that's already mid-stream — refresh the page or restart the video if you don't hear it come through the app right away. If routing doesn't work at all (see note below), you can still do it manually: Settings → System → Sound → Volume mixer → find your browser (or whichever app is playing the stream) → set its **Output device** to "CABLE Input (VB-Audio Virtual Cable)".
+4. **Devices are automatic** — the app finds VB-Audio Virtual Cable as its input and your system's current default playback device as output on its own, so there's nothing to pick here. If Chrome, Firefox, Edge, Brave, or Opera is already playing your livestream when the app opens, it's auto-selected and routed immediately too — you may not need to touch anything at all.
+5. **Otherwise, route it yourself**: start playback in your browser tab, click the 🔄 button to detect apps currently playing audio, then pick your browser from the dropdown next to it. Selecting it routes it right away — a green **"Isolating"** label confirms it worked. This usually won't move audio that's already mid-stream, so refresh the page or restart the video if you don't hear it come through the app right away. If routing doesn't work at all (see note below), you can still do it manually: Settings → System → Sound → Volume mixer → find your browser (or whichever app is playing the stream) → set its **Output device** to "CABLE Input (VB-Audio Virtual Cable)".
 6. **Use the controls** as needed: pick a channel mode (Both / Left / Right, with Mirror if isolating to one side), or check **Mute** to silence just this app's audio without touching anything else on your PC.
 
-That's it — the app remembers your device and mode choices, so future launches just work. Keep the app running in the background while you watch.
+That's it — the app remembers your choices, so future launches just work. Keep the app running in the background while you watch.
+
+### The ⚙ Settings dialog
+
+Click the gear icon at the top-right if you ever need to go beyond the defaults:
+
+- **Input** / **Output** device dropdowns, in case auto-detection picked the wrong one (e.g. you have more than one virtual cable or playback device installed).
+- **Simple Browser Selection**: swaps the "select your browser" dropdown for a row of icons, one per common browser currently playing audio. Click an icon instead of picking a name from a list.
+- **Developer Console**: off by default, and most people will never need it. Turning it on replaces the normal status area with a scrolling log of what the app is doing internally — useful if something isn't working and you want to see why, or if you're reporting a bug.
 
 ## For developers
 
@@ -75,10 +81,11 @@ This opens the control panel (an always-on-top window). See the [Quick Start](#q
 
 - `cargo test` runs the channel-mode DSP unit tests (`src/dsp.rs`).
 - `src/audio.rs` owns the real-time audio engine: device I/O, resampling, and the lock-free handoff between the input and output audio threads.
-- `src/main.rs` is the egui UI.
-- `src/config.rs` handles loading/saving the last-used devices and mode.
+- `src/winaudio.rs` talks directly to Windows' undocumented per-app audio routing API (see [How audio gets in](#how-audio-gets-in)): enumerating apps currently playing audio, routing one to CABLE Input and restoring it afterward, and extracting a running app's icon from its own `.exe` for Simple Browser Selection.
+- `src/main.rs` is the egui UI, including the Settings dialog (its own always-on-top OS window, not an in-app popup).
+- `src/config.rs` handles loading/saving user preferences (devices, mode, mute, Simple Browser Selection, Developer Console).
 
-Your device and mode selections are saved to `%APPDATA%\audio-isolation-mirror\config.json`.
+Your preferences are saved to `%APPDATA%\audio-isolation-mirror\config.json`.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
@@ -97,3 +104,4 @@ git push origin v0.1.0
 - No system tray mode, hotkeys, or level meters yet.
 - No native per-process loopback capture — a virtual audio cable is required. The app can route a chosen app's *output* to that cable for you (see step 5), but it still can't capture an app's audio directly.
 - The released `.exe` isn't code-signed, so the SmartScreen warning in the Quick Start above will appear on first run. This is a one-time click-through, not a sign of a problem.
+- Launch auto-routing and Simple Browser Selection only recognize a fixed list of common browsers (Chrome, Firefox, Edge, Brave, Opera). Anything else playing audio still shows up fine in the regular dropdown — it just isn't auto-selected or offered as an icon.
