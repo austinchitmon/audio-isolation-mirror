@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.4.0] - 2026-08-20
+
+### Added
+- Automatic device detection: the app now finds VB-Audio Virtual Cable as its input and your system's current default playback device as output on its own — no manual device selection needed for most users. Shows a warning dialog with install instructions and a download link if VB-Audio Virtual Cable can't be found.
+- Automatic launch routing: if Chrome, Firefox, Edge, Brave, or Opera is already playing audio when the app opens, it's auto-selected and routed to CABLE Input immediately, with no clicks needed.
+- Settings dialog (⚙ icon, top-right): a separate window holding the Input/Output device dropdowns (for the rare case auto-detection guesses wrong), Simple Browser Selection, and Developer Console — keeps the main window focused on what most people actually need.
+- Simple Browser Selection: an optional icon-based picker that swaps the browser dropdown for a row of icons — one per common browser currently playing audio — extracted live from each browser's own installed `.exe`.
+- Developer Console: an optional scrolling log of internal app activity (off by default), replacing the old always-visible status line for most users.
+- Vertical scrollbar on the main window for when it's resized shorter than its content.
+
+### Changed
+- Renamed the app to "Audio Channel Isolator".
+- Simplified the browser-selection row: relabeled to "Select your browser", moved the refresh button to the right of the dropdown, and shortened the routing confirmation message to "Isolating".
+- Refreshing the browser list no longer clears your current selection if that process is still playing audio.
+- The app's own process can no longer appear in the browser-selection list.
+
 ## [0.3.0] - 2026-08-17
 
 ### Added
